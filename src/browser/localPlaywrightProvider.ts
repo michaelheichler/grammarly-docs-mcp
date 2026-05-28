@@ -63,6 +63,7 @@ export type LocalGrammarlyFeatureResult = {
   finalUrl: string;
   panelText: string;
   documentText: string;
+  rewrittenText: string | null;
   scores: {
     writingQuality: number | null;
     aiDetectionPercent: number | null;
@@ -331,15 +332,39 @@ export class LocalPlaywrightProvider implements BrowserProvider {
       await this.fillEditor(page, text);
       const opened = await this.openFeaturePanel(page, feature);
       let rewriteStatus: RewriteAcceptanceStatus = "not-applicable";
+      let rewrittenText: string | null = null;
 
       if (rewriteProducingFeatures.has(feature)) {
         await page.waitForTimeout(featureWaitMs(feature));
         rewriteStatus = await tryAcceptRelevantRewriteSuggestion(page, text);
 
-        if (rewriteStatus === "not-found") {
-          await this.applyFeatureInstruction(page, feature, instruction);
-          await page.waitForTimeout(featureWaitMs(feature));
-          rewriteStatus = await tryAcceptRelevantRewriteSuggestion(page, text);
+        if (rewriteStatus !== "accepted") {
+          const prompt = buildRewriteAgentPrompt(feature, text, instruction);
+          const sent = await this.applyFeatureInstruction(
+            page,
+            feature,
+            prompt,
+          );
+          if (sent) {
+            rewrittenText = await waitForAgentRewrite({
+              page,
+              prompt,
+              originalText: text,
+              timeoutMs: 45_000,
+            });
+          }
+
+          if (rewrittenText) {
+            rewriteStatus = "chat-extracted";
+          } else {
+            const fallbackStatus = await tryAcceptRelevantRewriteSuggestion(
+              page,
+              text,
+            );
+            if (fallbackStatus !== "not-found") {
+              rewriteStatus = fallbackStatus;
+            }
+          }
         }
       } else {
         await this.applyFeatureInstruction(page, feature, instruction);
@@ -355,6 +380,7 @@ export class LocalPlaywrightProvider implements BrowserProvider {
         finalUrl: page.url(),
         bodyText,
         documentText,
+        rewrittenText,
         notes: buildRunFeatureNotes({
           opened,
           rewriteStatus,
@@ -588,13 +614,13 @@ export class LocalPlaywrightProvider implements BrowserProvider {
     page: Page,
     feature: LocalGrammarlyFeatureId,
     instruction?: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
     if (!instruction?.trim()) {
-      return;
+      return false;
     }
 
     if (!interactiveAgentFeatures.has(feature)) {
-      return;
+      return false;
     }
 
     const textboxes = page.getByRole("textbox");
@@ -605,11 +631,13 @@ export class LocalPlaywrightProvider implements BrowserProvider {
         await textbox.click({ timeout: 2_000 });
         await page.keyboard.insertText(instruction.trim());
         await page.keyboard.press("Enter");
-        return;
+        return true;
       } catch {
         // Try the next textbox; Grammarly agent input placement changes.
       }
     }
+
+    return false;
   }
 }
 
@@ -1132,6 +1160,7 @@ export async function tryAcceptRewriteSuggestion(page: Page): Promise<boolean> {
 
 type RewriteAcceptanceStatus =
   | "accepted"
+  | "chat-extracted"
   | "rejected-unrelated"
   | "not-found"
   | "not-applicable";
@@ -1153,10 +1182,16 @@ export function isRelatedRewrite(original: string, candidate: string): boolean {
   for (const token of originalTokens) {
     if (candidateTokens.has(token)) {
       overlap += 1;
+      if (token.length >= 8) {
+        return true;
+      }
     }
   }
 
-  return overlap / Math.min(originalTokens.size, candidateTokens.size) >= 0.25;
+  return (
+    overlap >= 2 ||
+    overlap / Math.min(originalTokens.size, candidateTokens.size) >= 0.15
+  );
 }
 
 async function tryAcceptRelevantRewriteSuggestion(
@@ -1177,6 +1212,90 @@ async function tryAcceptRelevantRewriteSuggestion(
   await page.keyboard.press("ControlOrMeta+Z").catch(() => undefined);
   await page.waitForTimeout(500);
   return "rejected-unrelated";
+}
+
+const rewriteResultMarker = "REWRITE_RESULT:";
+
+export function buildRewriteAgentPrompt(
+  feature: LocalGrammarlyFeatureId,
+  text: string,
+  instruction?: string,
+): string {
+  const label = featureMetadata[feature]?.label ?? feature;
+  const userInstruction = instruction?.trim()
+    ? `User instruction: ${instruction.trim()}\n\n`
+    : "";
+
+  return [
+    `Use ${label} on the text below.`,
+    userInstruction,
+    "Return only the final rewritten text.",
+    `Prefix the answer exactly with ${rewriteResultMarker}`,
+    "",
+    "Text:",
+    '"""',
+    text,
+    '"""',
+  ].join("\n");
+}
+
+export function extractAgentRewriteText(
+  panelText: string,
+  originalText: string,
+  prompt?: string,
+): string | null {
+  const normalized = normalizeText(panelText);
+  const markerIndex = normalized.lastIndexOf(rewriteResultMarker);
+
+  let candidate =
+    markerIndex >= 0
+      ? normalized.slice(markerIndex + rewriteResultMarker.length)
+      : extractTextAfterPrompt(normalized, prompt);
+
+  candidate = cleanAgentRewriteCandidate(candidate);
+  if (!candidate) {
+    return null;
+  }
+
+  if (!isRelatedRewrite(originalText, candidate)) {
+    return null;
+  }
+
+  return candidate;
+}
+
+async function waitForAgentRewrite({
+  page,
+  prompt,
+  originalText,
+  timeoutMs,
+}: {
+  page: Page;
+  prompt: string;
+  originalText: string;
+  timeoutMs: number;
+}): Promise<string | null> {
+  const deadline = Date.now() + timeoutMs;
+  let lastCandidate: string | null = null;
+  let stableCount = 0;
+
+  while (Date.now() < deadline) {
+    await page.waitForTimeout(1_000);
+    const bodyText = await getBodyText(page);
+    const candidate = extractAgentRewriteText(bodyText, originalText, prompt);
+
+    if (candidate && candidate === lastCandidate) {
+      stableCount += 1;
+      if (stableCount >= 2) {
+        return candidate;
+      }
+    } else {
+      lastCandidate = candidate;
+      stableCount = candidate ? 1 : 0;
+    }
+  }
+
+  return lastCandidate;
 }
 
 async function getBodyText(page: Page): Promise<string> {
@@ -1206,6 +1325,7 @@ function buildFeatureResult({
   finalUrl,
   bodyText,
   documentText,
+  rewrittenText,
   notes,
 }: {
   feature: LocalGrammarlyFeatureId;
@@ -1214,6 +1334,7 @@ function buildFeatureResult({
   finalUrl: string;
   bodyText: string;
   documentText: string;
+  rewrittenText?: string | null;
   notes: string;
 }): LocalGrammarlyFeatureResult {
   return {
@@ -1223,6 +1344,7 @@ function buildFeatureResult({
     finalUrl,
     panelText: summarizeText(bodyText, 2_000),
     documentText,
+    rewrittenText: rewrittenText ?? null,
     scores: {
       writingQuality: extractWritingQuality(bodyText),
       aiDetectionPercent: extractAiPercent(bodyText),
@@ -1248,6 +1370,10 @@ function buildRunFeatureNotes({
 
   if (rewriteStatus === "accepted") {
     return "Opened the requested Grammarly feature, accepted the visible rewrite suggestion, and extracted the updated editor text.";
+  }
+
+  if (rewriteStatus === "chat-extracted") {
+    return "Opened the requested Grammarly chat agent, waited for a stable assistant rewrite, and returned it in rewrittenText.";
   }
 
   if (rewriteStatus === "rejected-unrelated") {
@@ -1301,6 +1427,75 @@ function meaningfulTokens(text: string): Set<string> {
         (token) => token.length >= 4 && !commonRewriteStopWords.has(token),
       ),
   );
+}
+
+function extractTextAfterPrompt(text: string, prompt?: string): string {
+  if (!prompt?.trim()) {
+    return "";
+  }
+
+  const normalizedPrompt = normalizeText(prompt);
+  const promptIndex = text.lastIndexOf(normalizedPrompt);
+  if (promptIndex < 0) {
+    return "";
+  }
+
+  return text.slice(promptIndex + normalizedPrompt.length);
+}
+
+function cleanAgentRewriteCandidate(candidate: string): string {
+  let cleaned = normalizeText(candidate)
+    .replace(/^["'“”]+|["'“”]+$/g, "")
+    .replace(/\s+\b[A-Z]\s+\d{1,6}\s+words?$/i, "")
+    .replace(/\s+\d{1,6}\s+words?$/i, "")
+    .trim();
+
+  cleaned = cleaned.replace(
+    /^Hi Michael,?\s+I can help you create the best version of your writing\.?\s*/i,
+    "",
+  );
+  cleaned = cleaned.replace(
+    /^Take action without waiting for approval\.?\s+Propose edits or content right away\.?\s*/i,
+    "",
+  );
+
+  const tailMarkers = [
+    "Grammarly Proofreader",
+    "Writing quality",
+    "Ready when you are",
+    "Suggestions",
+    "Accept",
+    "Dismiss",
+    "AI Chat",
+  ];
+  for (const marker of tailMarkers) {
+    const index = cleaned.search(
+      new RegExp(`\\b${escapeRegExp(marker)}\\b`, "i"),
+    );
+    if (index > 20) {
+      cleaned = cleaned.slice(0, index).trim();
+    }
+  }
+
+  if (isAgentBoilerplate(cleaned)) {
+    return "";
+  }
+
+  return cleaned;
+}
+
+function isAgentBoilerplate(text: string): boolean {
+  if (text.length < 20) {
+    return true;
+  }
+
+  return /^(hi michael|i can help you create the best version|take action without waiting|ready when you are|add \d+ words?)/i.test(
+    text,
+  );
+}
+
+function normalizeText(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
 }
 
 function extractAiPercent(text: string): number | null {

@@ -80,7 +80,7 @@ brand-tones
 
 Some IDs are public Grammarly product surfaces that may not appear in every Grammarly Docs account. When a feature is not visible locally, the server returns `available: false` instead of pretending it ran.
 
-Rewrite-producing tools such as Humanizer, Paraphraser, and AI Rewriter apply Grammarly's visible rewrite suggestion when an `Accept` control is available. The server rejects accepted text that does not appear related to the current input, then returns the editor state in `documentText`.
+Rewrite-producing tools such as Humanizer, Paraphraser, and AI Rewriter first apply Grammarly's visible rewrite suggestion when an `Accept` control is available. If Grammarly opens a chat agent instead, the server sends a marked rewrite prompt, waits for the assistant text to stabilize, and returns that answer in `rewrittenText`. Accepted suggestions still update `documentText`.
 
 ## Requirements
 
@@ -270,6 +270,7 @@ By default, each normal local call clones the logged-in base profile into an iso
   "finalUrl": "https://coda.grammarly.com/...",
   "panelText": "Visible Grammarly panel text...",
   "documentText": "Text visible in the editor...",
+  "rewrittenText": null,
   "scores": {
     "writingQuality": null,
     "aiDetectionPercent": 48,

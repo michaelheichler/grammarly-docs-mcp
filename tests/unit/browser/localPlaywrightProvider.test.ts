@@ -4,7 +4,9 @@ import * as path from "node:path";
 import type { Page } from "playwright";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  buildRewriteAgentPrompt,
   copyBrowserProfile,
+  extractAgentRewriteText,
   isRelatedRewrite,
   prepareSessionProfile,
   shouldCopyProfileEntry,
@@ -183,6 +185,15 @@ describe("rewrite suggestion handling", () => {
     ).toBe(true);
   });
 
+  it("treats a marked rewrite with changed wording as related", () => {
+    expect(
+      isRelatedRewrite(
+        "ZXHUM1780001893061: This comprehensive initiative leverages a multifaceted framework to streamline cross-functional collaboration and maximize stakeholder alignment.",
+        "ZXHUM1780001893061: This initiative uses a flexible approach to make teamwork easier and ensure everyone involved is on the same page.",
+      ),
+    ).toBe(true);
+  });
+
   it("rejects cached rewrite text from an unrelated document", () => {
     expect(
       isRelatedRewrite(
@@ -190,5 +201,53 @@ describe("rewrite suggestion handling", () => {
         "This home offers 6,000 square feet, five bedrooms, a guest suite, and a landscaped courtyard.",
       ),
     ).toBe(false);
+  });
+
+  it("builds a marked rewrite prompt for chat agents", () => {
+    const prompt = buildRewriteAgentPrompt(
+      "humanizer",
+      "This paragraph sounds robotic and overly polished.",
+      "Make it sound natural.",
+    );
+
+    expect(prompt).toContain("Use Humanizer");
+    expect(prompt).toContain("Make it sound natural.");
+    expect(prompt).toContain("REWRITE_RESULT:");
+    expect(prompt).toContain("This paragraph sounds robotic");
+  });
+
+  it("extracts a marked stable chat rewrite without panel chrome", () => {
+    const original =
+      "The sprint planning note is overly polished and sounds generated.";
+    const panelText = [
+      "AI Chat",
+      "REWRITE_RESULT: The sprint planning note sounds too formal and artificial.",
+      "Grammarly Proofreader",
+      "Writing quality 100 / 100",
+    ].join("\n");
+
+    expect(extractAgentRewriteText(panelText, original)).toBe(
+      "The sprint planning note sounds too formal and artificial.",
+    );
+  });
+
+  it("strips Grammarly word-count badges from marked chat rewrites", () => {
+    expect(
+      extractAgentRewriteText(
+        "REWRITE_RESULT: ZXHUM1780001893061: This initiative uses a flexible approach to make teamwork easier. M 21 words",
+        "ZXHUM1780001893061: This comprehensive initiative leverages a multifaceted framework.",
+      ),
+    ).toBe(
+      "ZXHUM1780001893061: This initiative uses a flexible approach to make teamwork easier.",
+    );
+  });
+
+  it("rejects chat onboarding boilerplate as a rewrite", () => {
+    expect(
+      extractAgentRewriteText(
+        "AI Chat Hi Michael, I can help you create the best version of your writing. Take action without waiting for approval.",
+        "The sprint planning note is overly polished and sounds generated.",
+      ),
+    ).toBeNull();
   });
 });
