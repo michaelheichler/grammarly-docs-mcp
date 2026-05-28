@@ -8,6 +8,7 @@ import {
   copyBrowserProfile,
   extractAgentRewriteText,
   isRelatedRewrite,
+  parseAiDetectorPanel,
   prepareSessionProfile,
   shouldCopyProfileEntry,
   tryAcceptRewriteSuggestion,
@@ -138,6 +139,50 @@ describe("local Playwright profile isolation", () => {
 
     expect(plan.profileDir).toBe(profileDir);
     expect(plan.removeProfileOnClose).toBe(false);
+  });
+});
+
+describe("AI Detector polling parser", () => {
+  it("marks detector output ready when a percent is visible", () => {
+    expect(
+      parseAiDetectorPanel("AI Detector 84% of this text appears AI-generated"),
+    ).toEqual(
+      expect.objectContaining({
+        aiDetectionPercent: 84,
+        ready: true,
+      }),
+    );
+  });
+
+  it("treats no-AI detector verdicts as zero percent", () => {
+    expect(
+      parseAiDetectorPanel("No AI-generated text detected in this document."),
+    ).toEqual(
+      expect.objectContaining({
+        aiDetectionPercent: 0,
+        ready: true,
+      }),
+    );
+  });
+
+  it("keeps loading or unrelated chrome as not ready", () => {
+    expect(
+      parseAiDetectorPanel("AI Detector Grammarly Proofreader Writing quality"),
+    ).toEqual(
+      expect.objectContaining({
+        aiDetectionPercent: null,
+        ready: false,
+      }),
+    );
+  });
+
+  it("marks short-text terminal states ready even without a percent", () => {
+    expect(parseAiDetectorPanel("Ready when you are. Add 30 words to see your score.")).toEqual(
+      expect.objectContaining({
+        aiDetectionPercent: null,
+        ready: true,
+      }),
+    );
   });
 });
 

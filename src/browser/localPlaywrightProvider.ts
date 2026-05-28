@@ -187,17 +187,19 @@ export class LocalPlaywrightProvider implements BrowserProvider {
 
     await this.fillEditor(page, text);
 
-    const visibleTextSnapshots: string[] = [];
     await this.tryOpenAiDetectorPanel(page);
-    await page.waitForTimeout(8_000);
-    visibleTextSnapshots.push(await getBodyText(page));
+    const aiDetectorResult = await waitForAiDetectorResult(page, {
+      timeoutMs: 45_000,
+    });
 
+    const visibleTextSnapshots: string[] = [aiDetectorResult.bodyText];
     await this.tryOpenPlagiarismPanel(page);
     await page.waitForTimeout(10_000);
     visibleTextSnapshots.push(await getBodyText(page));
 
     const bodyText = visibleTextSnapshots.join("\n\n");
-    const aiDetectionPercent = extractAiPercent(bodyText);
+    const aiDetectionPercent =
+      aiDetectorResult.aiDetectionPercent ?? extractAiPercent(bodyText);
     const plagiarismPercent = extractPlagiarismPercent(bodyText);
 
     return {
@@ -333,8 +335,14 @@ export class LocalPlaywrightProvider implements BrowserProvider {
       const opened = await this.openFeaturePanel(page, feature);
       let rewriteStatus: RewriteAcceptanceStatus = "not-applicable";
       let rewrittenText: string | null = null;
+      let settledBodyText: string | null = null;
 
-      if (rewriteProducingFeatures.has(feature)) {
+      if (feature === "ai-detector") {
+        const aiDetectorResult = await waitForAiDetectorResult(page, {
+          timeoutMs: 45_000,
+        });
+        settledBodyText = aiDetectorResult.bodyText;
+      } else if (rewriteProducingFeatures.has(feature)) {
         await page.waitForTimeout(featureWaitMs(feature));
         rewriteStatus = await tryAcceptRelevantRewriteSuggestion(page, text);
 
@@ -371,7 +379,7 @@ export class LocalPlaywrightProvider implements BrowserProvider {
         await page.waitForTimeout(featureWaitMs(feature));
       }
 
-      const bodyText = await getBodyText(page);
+      const bodyText = settledBodyText ?? (await getBodyText(page));
       const documentText = await getDocumentText(page, text);
       return buildFeatureResult({
         feature,
@@ -1158,6 +1166,65 @@ export async function tryAcceptRewriteSuggestion(page: Page): Promise<boolean> {
   ]);
 }
 
+export type AiDetectorPollResult = {
+  bodyText: string;
+  aiDetectionPercent: number | null;
+  ready: boolean;
+};
+
+export function parseAiDetectorPanel(bodyText: string): AiDetectorPollResult {
+  const aiDetectionPercent = extractAiPercent(bodyText);
+  return {
+    bodyText,
+    aiDetectionPercent,
+    ready:
+      aiDetectionPercent !== null ||
+      /not enough text|add \d+ words?|ready when you are|couldn't check|unable to check|try again/i.test(
+        bodyText,
+      ),
+  };
+}
+
+async function waitForAiDetectorResult(
+  page: Page,
+  { timeoutMs }: { timeoutMs: number },
+): Promise<AiDetectorPollResult> {
+  const deadline = Date.now() + timeoutMs;
+  let lastResult: AiDetectorPollResult = parseAiDetectorPanel(
+    await getBodyText(page),
+  );
+  let lastBodyText = lastResult.bodyText;
+  let stableCount = 0;
+
+  while (Date.now() < deadline) {
+    if (lastResult.aiDetectionPercent !== null) {
+      return lastResult;
+    }
+
+    await page.waitForTimeout(1_000);
+    const bodyText = await getBodyText(page);
+    const result = parseAiDetectorPanel(bodyText);
+
+    if (result.aiDetectionPercent !== null) {
+      return result;
+    }
+
+    if (normalizeText(bodyText) === normalizeText(lastBodyText)) {
+      stableCount += 1;
+      if (stableCount >= 3 && result.ready) {
+        return result;
+      }
+    } else {
+      stableCount = 0;
+    }
+
+    lastBodyText = bodyText;
+    lastResult = result;
+  }
+
+  return lastResult;
+}
+
 type RewriteAcceptanceStatus =
   | "accepted"
   | "chat-extracted"
@@ -1499,6 +1566,14 @@ function normalizeText(text: string): string {
 }
 
 function extractAiPercent(text: string): number | null {
+  if (
+    /(?:no|0)\s+(?:ai|ai-generated|generated)\s+(?:text|content|writing)\s+(?:detected|found)|unlikely to be (?:ai|ai-generated)/i.test(
+      text,
+    )
+  ) {
+    return 0;
+  }
+
   return extractPercentNear(text, [
     /(\d{1,3})\s*%\s*(?:ai|generated|ai-generated|ai written|ai-written)/i,
     /(?:ai|generated|ai-generated|ai written|ai-written)[^\d]{0,80}(\d{1,3})\s*%/i,
