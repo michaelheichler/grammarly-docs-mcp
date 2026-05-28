@@ -330,8 +330,21 @@ export class LocalPlaywrightProvider implements BrowserProvider {
 
       await this.fillEditor(page, text);
       const opened = await this.openFeaturePanel(page, feature);
-      await this.applyFeatureInstruction(page, feature, instruction);
-      await page.waitForTimeout(featureWaitMs(feature));
+      let acceptedRewrite = false;
+
+      if (rewriteProducingFeatures.has(feature)) {
+        await page.waitForTimeout(featureWaitMs(feature));
+        acceptedRewrite = await tryAcceptRewriteSuggestion(page);
+
+        if (!acceptedRewrite) {
+          await this.applyFeatureInstruction(page, feature, instruction);
+          await page.waitForTimeout(featureWaitMs(feature));
+          acceptedRewrite = await tryAcceptRewriteSuggestion(page);
+        }
+      } else {
+        await this.applyFeatureInstruction(page, feature, instruction);
+        await page.waitForTimeout(featureWaitMs(feature));
+      }
 
       const bodyText = await getBodyText(page);
       const documentText = await getDocumentText(page, text);
@@ -342,9 +355,11 @@ export class LocalPlaywrightProvider implements BrowserProvider {
         finalUrl: page.url(),
         bodyText,
         documentText,
-        notes: opened
-          ? "Opened the requested Grammarly feature in the local Docs UI and extracted visible output."
-          : "The requested feature did not expose a clickable local Docs control; returned the proofreader/editor state instead.",
+        notes: buildRunFeatureNotes({
+          opened,
+          acceptedRewrite,
+          rewriteProducing: rewriteProducingFeatures.has(feature),
+        }),
       });
     } finally {
       await closeLocalSession(session);
@@ -942,6 +957,14 @@ const interactiveAgentFeatures = new Set<LocalGrammarlyFeatureId>([
   "essay-checker",
 ]);
 
+const rewriteProducingFeatures = new Set<LocalGrammarlyFeatureId>([
+  "paraphraser",
+  "paraphrasing-tool",
+  "humanizer",
+  "ai-humanizer",
+  "ai-rewriter",
+]);
+
 async function ensurePage(context: BrowserContext): Promise<Page> {
   const existing = context.pages()[0];
   return existing ?? context.newPage();
@@ -1074,6 +1097,7 @@ function featureWaitMs(feature: LocalGrammarlyFeatureId): number {
     case "paraphraser":
     case "reader-reactions":
     case "humanizer":
+    case "ai-humanizer":
     case "citation":
     case "ai-rewriter":
     case "ai-grader":
@@ -1095,6 +1119,15 @@ async function clickFirstVisible(locators: Locator[]): Promise<boolean> {
   }
 
   return false;
+}
+
+export async function tryAcceptRewriteSuggestion(page: Page): Promise<boolean> {
+  return clickFirstVisible([
+    page.getByRole("button", { name: /^accept$/i }),
+    page.locator('button[aria-label="Accept"]'),
+    page.locator('[role="button"][aria-label="Accept"]'),
+    page.getByText(/^Accept$/i),
+  ]);
 }
 
 async function getBodyText(page: Page): Promise<string> {
@@ -1149,6 +1182,30 @@ function buildFeatureResult({
     metrics: computeTextMetrics(documentText, bodyText),
     notes,
   };
+}
+
+function buildRunFeatureNotes({
+  opened,
+  acceptedRewrite,
+  rewriteProducing,
+}: {
+  opened: boolean;
+  acceptedRewrite: boolean;
+  rewriteProducing: boolean;
+}): string {
+  if (!opened) {
+    return "The requested feature did not expose a clickable local Docs control; returned the proofreader/editor state instead.";
+  }
+
+  if (acceptedRewrite) {
+    return "Opened the requested Grammarly feature, accepted the visible rewrite suggestion, and extracted the updated editor text.";
+  }
+
+  if (rewriteProducing) {
+    return "Opened the requested Grammarly rewrite feature, but no visible Accept control appeared; returned the visible panel and editor state.";
+  }
+
+  return "Opened the requested Grammarly feature in the local Docs UI and extracted visible output.";
 }
 
 function extractWritingQuality(text: string): number | null {

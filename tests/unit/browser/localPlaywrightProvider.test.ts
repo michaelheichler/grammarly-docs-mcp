@@ -1,11 +1,13 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { Page } from "playwright";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   copyBrowserProfile,
   prepareSessionProfile,
   shouldCopyProfileEntry,
+  tryAcceptRewriteSuggestion,
 } from "../../../src/browser/localPlaywrightProvider";
 import type { AppConfig } from "../../../src/config";
 
@@ -133,5 +135,41 @@ describe("local Playwright profile isolation", () => {
 
     expect(plan.profileDir).toBe(profileDir);
     expect(plan.removeProfileOnClose).toBe(false);
+  });
+});
+
+describe("rewrite suggestion handling", () => {
+  function locatorThat(click: () => Promise<void>) {
+    return {
+      first: () => ({
+        click,
+      }),
+    };
+  }
+
+  it("accepts a visible Grammarly rewrite suggestion", async () => {
+    const acceptClick = vi.fn().mockResolvedValue(undefined);
+    const page = {
+      getByRole: vi.fn(() => locatorThat(acceptClick)),
+      locator: vi.fn(() => locatorThat(vi.fn())),
+      getByText: vi.fn(() => locatorThat(vi.fn())),
+    } as unknown as Page;
+
+    await expect(tryAcceptRewriteSuggestion(page)).resolves.toBe(true);
+    expect(acceptClick).toHaveBeenCalledWith({ timeout: 5_000 });
+  });
+
+  it("falls back across selectors when the first Accept locator is not clickable", async () => {
+    const missingClick = vi.fn().mockRejectedValue(new Error("not visible"));
+    const acceptClick = vi.fn().mockResolvedValue(undefined);
+    const page = {
+      getByRole: vi.fn(() => locatorThat(missingClick)),
+      locator: vi.fn(() => locatorThat(acceptClick)),
+      getByText: vi.fn(() => locatorThat(vi.fn())),
+    } as unknown as Page;
+
+    await expect(tryAcceptRewriteSuggestion(page)).resolves.toBe(true);
+    expect(missingClick).toHaveBeenCalledWith({ timeout: 5_000 });
+    expect(acceptClick).toHaveBeenCalledWith({ timeout: 5_000 });
   });
 });
