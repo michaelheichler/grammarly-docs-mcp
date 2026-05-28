@@ -51,6 +51,7 @@ export type BrowserProviderName =
   | "stagehand"
   | "browser-use"
   | "local-playwright";
+export type LocalBrowserSessionMode = "isolated-copy" | "shared-profile";
 
 export interface AppConfig {
   // Environment isolation
@@ -68,6 +69,9 @@ export interface AppConfig {
   localBrowserHeadless: boolean;
   localBrowserChannel: string | undefined;
   localBrowserExecutable: string | undefined;
+  localBrowserSessionMode?: LocalBrowserSessionMode;
+  localBrowserSessionProfileRoot?: string;
+  localBrowserKeepSessionProfiles?: boolean;
 
   // Browserbase + Stagehand (primary provider)
   browserbaseApiKey: string | undefined;
@@ -141,6 +145,18 @@ const EnvSchema = z.object({
     .default(false),
   LOCAL_BROWSER_CHANNEL: z.string().optional(),
   LOCAL_BROWSER_EXECUTABLE: z.string().optional(),
+  LOCAL_BROWSER_SESSION_MODE: z
+    .enum(["isolated-copy", "shared-profile"])
+    .default("isolated-copy"),
+  LOCAL_BROWSER_SESSION_PROFILE_ROOT: z
+    .string()
+    .default("~/.grammarly-mcp/session-profiles"),
+  LOCAL_BROWSER_KEEP_SESSION_PROFILES: z
+    .preprocess(
+      (val) => val === "true" || val === true,
+      z.boolean().default(false),
+    )
+    .default(false),
 
   // Browserbase + Stagehand (required when BROWSER_PROVIDER=stagehand)
   BROWSERBASE_API_KEY: z.string().optional(),
@@ -284,6 +300,20 @@ export const config: AppConfig = {
   localBrowserHeadless: env.LOCAL_BROWSER_HEADLESS,
   localBrowserChannel: env.LOCAL_BROWSER_CHANNEL,
   localBrowserExecutable: env.LOCAL_BROWSER_EXECUTABLE,
+  localBrowserSessionMode: env.LOCAL_BROWSER_SESSION_MODE,
+  localBrowserSessionProfileRoot:
+    env.LOCAL_BROWSER_SESSION_PROFILE_ROOT ===
+    "~/.grammarly-mcp/session-profiles"
+      ? path.join(
+          process.env.HOME ?? process.cwd(),
+          ".grammarly-mcp",
+          "session-profiles",
+        )
+      : env.LOCAL_BROWSER_SESSION_PROFILE_ROOT.replace(
+          /^~(?=$|\/)/,
+          process.env.HOME ?? "",
+        ),
+  localBrowserKeepSessionProfiles: env.LOCAL_BROWSER_KEEP_SESSION_PROFILES,
 
   // Browserbase + Stagehand (primary)
   browserbaseApiKey: env.BROWSERBASE_API_KEY,

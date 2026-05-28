@@ -1,4 +1,6 @@
+import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
+import * as path from "node:path";
 import {
   type BrowserContext,
   chromium,
@@ -90,11 +92,36 @@ type TextMetrics = {
 type LocalSession = {
   context: BrowserContext;
   page: Page;
+  profileDir: string;
+  removeProfileOnClose: boolean;
 };
 
-type LaunchSessionOptions = {
+export type LaunchSessionOptions = {
   forceHeaded?: boolean;
+  useSharedProfile?: boolean;
 };
+
+export type SessionProfilePlan = {
+  profileDir: string;
+  removeProfileOnClose: boolean;
+};
+
+const profileCopySkippedNames = new Set([
+  "BrowserMetrics",
+  "Cache",
+  "Code Cache",
+  "Crashpad",
+  "DawnCache",
+  "GPUCache",
+  "GrShaderCache",
+  "Safe Browsing",
+  "ShaderCache",
+  "SingletonCookie",
+  "SingletonLock",
+  "SingletonSocket",
+  "component_crx_cache",
+  "lockfile",
+]);
 
 export class LocalPlaywrightProvider implements BrowserProvider {
   readonly providerName = "local-playwright" as const;
@@ -108,7 +135,7 @@ export class LocalPlaywrightProvider implements BrowserProvider {
 
   async createSession(): Promise<SessionResult> {
     const session = await this.launchSession();
-    const sessionId = `local-${Date.now()}`;
+    const sessionId = `local-${randomUUID()}`;
     this.sessions.set(sessionId, session);
 
     await session.page.goto(GRAMMARLY_HOME, {
@@ -191,7 +218,7 @@ export class LocalPlaywrightProvider implements BrowserProvider {
     }
 
     this.sessions.delete(sessionId);
-    await session.context.close();
+    await closeLocalSession(session);
   }
 
   async openLoginBrowser(waitMs = DEFAULT_LOGIN_WAIT_MS): Promise<{
@@ -199,7 +226,10 @@ export class LocalPlaywrightProvider implements BrowserProvider {
     finalUrl: string;
     loggedIn: boolean;
   }> {
-    const session = await this.launchSession({ forceHeaded: true });
+    const session = await this.launchSession({
+      forceHeaded: true,
+      useSharedProfile: true,
+    });
     try {
       await session.page.goto(GRAMMARLY_HOME, {
         waitUntil: "domcontentloaded",
@@ -213,7 +243,7 @@ export class LocalPlaywrightProvider implements BrowserProvider {
         loggedIn: loginState.loggedIn,
       };
     } finally {
-      await session.context.close();
+      await closeLocalSession(session);
     }
   }
 
@@ -256,7 +286,7 @@ export class LocalPlaywrightProvider implements BrowserProvider {
         notes: `Detected Grammarly Docs agent controls: ${Array.from(visibleAgentLabels).join(", ") || "none"}.`,
       };
     } finally {
-      await session.context.close();
+      await closeLocalSession(session);
     }
   }
 
@@ -317,14 +347,14 @@ export class LocalPlaywrightProvider implements BrowserProvider {
           : "The requested feature did not expose a clickable local Docs control; returned the proofreader/editor state instead.",
       });
     } finally {
-      await session.context.close();
+      await closeLocalSession(session);
     }
   }
 
   private async launchSession(
     options: LaunchSessionOptions = {},
   ): Promise<LocalSession> {
-    fs.mkdirSync(this.config.localBrowserProfileDir, { recursive: true });
+    const profilePlan = prepareSessionProfile(this.config, options);
 
     const baseOptions = {
       headless: options.forceHeaded ? false : this.config.localBrowserHeadless,
@@ -337,7 +367,7 @@ export class LocalPlaywrightProvider implements BrowserProvider {
 
     try {
       const context = await chromium.launchPersistentContext(
-        this.config.localBrowserProfileDir,
+        profilePlan.profileDir,
         {
           ...baseOptions,
           ...(this.config.localBrowserChannel
@@ -345,12 +375,18 @@ export class LocalPlaywrightProvider implements BrowserProvider {
             : {}),
         },
       );
-      return { context, page: await ensurePage(context) };
+      return {
+        context,
+        page: await ensurePage(context),
+        profileDir: profilePlan.profileDir,
+        removeProfileOnClose: profilePlan.removeProfileOnClose,
+      };
     } catch (error) {
       if (
         this.config.localBrowserChannel ||
         this.config.localBrowserExecutable
       ) {
+        cleanupSessionProfile(profilePlan);
         throw error;
       }
 
@@ -361,14 +397,24 @@ export class LocalPlaywrightProvider implements BrowserProvider {
           error: error instanceof Error ? error.message : String(error),
         },
       );
-      const context = await chromium.launchPersistentContext(
-        this.config.localBrowserProfileDir,
-        {
-          ...baseOptions,
-          channel: "chrome",
-        },
-      );
-      return { context, page: await ensurePage(context) };
+      try {
+        const context = await chromium.launchPersistentContext(
+          profilePlan.profileDir,
+          {
+            ...baseOptions,
+            channel: "chrome",
+          },
+        );
+        return {
+          context,
+          page: await ensurePage(context),
+          profileDir: profilePlan.profileDir,
+          removeProfileOnClose: profilePlan.removeProfileOnClose,
+        };
+      } catch (fallbackError) {
+        cleanupSessionProfile(profilePlan);
+        throw fallbackError;
+      }
     }
   }
 
@@ -550,6 +596,72 @@ export class LocalPlaywrightProvider implements BrowserProvider {
       }
     }
   }
+}
+
+export function shouldCopyProfileEntry(sourcePath: string): boolean {
+  return !profileCopySkippedNames.has(path.basename(sourcePath));
+}
+
+export function prepareSessionProfile(
+  config: AppConfig,
+  options: LaunchSessionOptions = {},
+): SessionProfilePlan {
+  fs.mkdirSync(config.localBrowserProfileDir, { recursive: true });
+
+  const sessionMode = config.localBrowserSessionMode ?? "isolated-copy";
+  if (options.useSharedProfile || sessionMode === "shared-profile") {
+    return {
+      profileDir: config.localBrowserProfileDir,
+      removeProfileOnClose: false,
+    };
+  }
+
+  const profileRoot =
+    config.localBrowserSessionProfileRoot ??
+    path.join(path.dirname(config.localBrowserProfileDir), "session-profiles");
+  fs.mkdirSync(profileRoot, { recursive: true });
+
+  const profileDir = path.join(profileRoot, `local-${randomUUID()}`);
+  fs.mkdirSync(profileDir, { recursive: true });
+  copyBrowserProfile(config.localBrowserProfileDir, profileDir);
+
+  return {
+    profileDir,
+    removeProfileOnClose: !config.localBrowserKeepSessionProfiles,
+  };
+}
+
+export function copyBrowserProfile(sourceDir: string, targetDir: string): void {
+  if (!fs.existsSync(sourceDir)) {
+    fs.mkdirSync(targetDir, { recursive: true });
+    return;
+  }
+
+  fs.cpSync(sourceDir, targetDir, {
+    recursive: true,
+    force: true,
+    errorOnExist: false,
+    filter: shouldCopyProfileEntry,
+  });
+}
+
+async function closeLocalSession(session: LocalSession): Promise<void> {
+  try {
+    await session.context.close();
+  } finally {
+    cleanupSessionProfile({
+      profileDir: session.profileDir,
+      removeProfileOnClose: session.removeProfileOnClose,
+    });
+  }
+}
+
+function cleanupSessionProfile(profilePlan: SessionProfilePlan): void {
+  if (!profilePlan.removeProfileOnClose) {
+    return;
+  }
+
+  fs.rmSync(profilePlan.profileDir, { recursive: true, force: true });
 }
 
 export async function openLocalGrammarlyLogin(

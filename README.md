@@ -112,6 +112,7 @@ BROWSER_PROVIDER=local-playwright
 LOCAL_BROWSER_CHANNEL=chrome
 LOCAL_BROWSER_HEADLESS=true
 LOCAL_BROWSER_PROFILE_DIR=~/.grammarly-mcp/chrome-profile
+LOCAL_BROWSER_SESSION_MODE=isolated-copy
 REWRITE_LLM_PROVIDER=claude-code
 CLAUDE_MODEL=auto
 LOG_LEVEL=info
@@ -149,6 +150,7 @@ Add this server entry to your Claude Desktop MCP configuration:
         "LOCAL_BROWSER_CHANNEL": "chrome",
         "LOCAL_BROWSER_HEADLESS": "true",
         "LOCAL_BROWSER_PROFILE_DIR": "/Users/you/.grammarly-mcp/chrome-profile",
+        "LOCAL_BROWSER_SESSION_MODE": "isolated-copy",
         "REWRITE_LLM_PROVIDER": "claude-code",
         "CLAUDE_MODEL": "auto"
       }
@@ -174,6 +176,8 @@ Add this server entry to your Claude Desktop MCP configuration:
 5. Use `grammarly_list_features` to verify the session.
 
 After login, normal calls can run in headless Chrome without putting a browser window in front of you.
+
+By default, each normal local call clones the logged-in base profile into an isolated temporary profile. That allows simultaneous MCP calls to run in separate browser instances without Chromium profile-lock conflicts.
 
 ## Usage Examples
 
@@ -298,6 +302,9 @@ After login, normal calls can run in headless Chrome without putting a browser w
 | `LOCAL_BROWSER_HEADLESS` | `false` | Runs normal local calls headlessly when `true`. |
 | `LOCAL_BROWSER_CHANNEL` | unset | Browser channel such as `chrome`. |
 | `LOCAL_BROWSER_EXECUTABLE` | unset | Explicit browser executable path. |
+| `LOCAL_BROWSER_SESSION_MODE` | `isolated-copy` | `isolated-copy` clones the login profile per call for parallel browser sessions; `shared-profile` uses the base profile directly. |
+| `LOCAL_BROWSER_SESSION_PROFILE_ROOT` | `~/.grammarly-mcp/session-profiles` | Temporary profile root for isolated local sessions. |
+| `LOCAL_BROWSER_KEEP_SESSION_PROFILES` | `false` | Keeps isolated session profile copies after browser close for debugging. |
 | `REWRITE_LLM_PROVIDER` | auto | `claude-code`, `openai`, `google`, or `anthropic`. |
 | `CLAUDE_MODEL` | `auto` | `auto`, `haiku`, `sonnet`, or `opus`. |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, or `error`. |
@@ -332,10 +339,15 @@ Grammarly did not show that score in the visible panel. AI Detector and Plagiari
 
 Normal local calls should be headless when `LOCAL_BROWSER_HEADLESS=true`. The login tool intentionally opens a visible browser.
 
+### Parallel local calls fail with a profile-lock error
+
+Use the default `LOCAL_BROWSER_SESSION_MODE=isolated-copy`. `shared-profile` can only support one Chromium process at a time because Chrome locks the user-data directory.
+
 ## Security Notes
 
-- The server reads and writes inside a persistent browser profile.
-- Do not share the profile directory.
+- The login tool reads and writes inside the persistent base browser profile.
+- Normal local calls copy the base profile into temporary isolated profiles by default.
+- Do not share the base profile directory.
 - Do not commit `.env`.
 - Treat Grammarly document contents as sensitive.
 - This project does not store Grammarly credentials in the repository.
