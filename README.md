@@ -80,7 +80,7 @@ brand-tones
 
 Some IDs are public Grammarly product surfaces that may not appear in every Grammarly Docs account. When a feature is not visible locally, the server returns `available: false` instead of pretending it ran.
 
-Rewrite-producing tools such as Humanizer, Paraphraser, and AI Rewriter apply Grammarly's visible rewrite suggestion when an `Accept` control is available. The accepted rewrite is returned in `documentText`.
+Rewrite-producing tools such as Humanizer, Paraphraser, and AI Rewriter apply Grammarly's visible rewrite suggestion when an `Accept` control is available. The server rejects accepted text that does not appear related to the current input, then returns the editor state in `documentText`.
 
 ## Requirements
 

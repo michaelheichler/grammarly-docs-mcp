@@ -330,16 +330,16 @@ export class LocalPlaywrightProvider implements BrowserProvider {
 
       await this.fillEditor(page, text);
       const opened = await this.openFeaturePanel(page, feature);
-      let acceptedRewrite = false;
+      let rewriteStatus: RewriteAcceptanceStatus = "not-applicable";
 
       if (rewriteProducingFeatures.has(feature)) {
         await page.waitForTimeout(featureWaitMs(feature));
-        acceptedRewrite = await tryAcceptRewriteSuggestion(page);
+        rewriteStatus = await tryAcceptRelevantRewriteSuggestion(page, text);
 
-        if (!acceptedRewrite) {
+        if (rewriteStatus === "not-found") {
           await this.applyFeatureInstruction(page, feature, instruction);
           await page.waitForTimeout(featureWaitMs(feature));
-          acceptedRewrite = await tryAcceptRewriteSuggestion(page);
+          rewriteStatus = await tryAcceptRelevantRewriteSuggestion(page, text);
         }
       } else {
         await this.applyFeatureInstruction(page, feature, instruction);
@@ -357,7 +357,7 @@ export class LocalPlaywrightProvider implements BrowserProvider {
         documentText,
         notes: buildRunFeatureNotes({
           opened,
-          acceptedRewrite,
+          rewriteStatus,
           rewriteProducing: rewriteProducingFeatures.has(feature),
         }),
       });
@@ -1130,6 +1130,55 @@ export async function tryAcceptRewriteSuggestion(page: Page): Promise<boolean> {
   ]);
 }
 
+type RewriteAcceptanceStatus =
+  | "accepted"
+  | "rejected-unrelated"
+  | "not-found"
+  | "not-applicable";
+
+export function isRelatedRewrite(original: string, candidate: string): boolean {
+  const originalText = original.trim();
+  const candidateText = candidate.trim();
+  if (!originalText || !candidateText || candidateText === originalText) {
+    return false;
+  }
+
+  const originalTokens = meaningfulTokens(originalText);
+  const candidateTokens = meaningfulTokens(candidateText);
+  if (originalTokens.size < 4 || candidateTokens.size < 4) {
+    return true;
+  }
+
+  let overlap = 0;
+  for (const token of originalTokens) {
+    if (candidateTokens.has(token)) {
+      overlap += 1;
+    }
+  }
+
+  return overlap / Math.min(originalTokens.size, candidateTokens.size) >= 0.25;
+}
+
+async function tryAcceptRelevantRewriteSuggestion(
+  page: Page,
+  originalText: string,
+): Promise<RewriteAcceptanceStatus> {
+  const accepted = await tryAcceptRewriteSuggestion(page);
+  if (!accepted) {
+    return "not-found";
+  }
+
+  await page.waitForTimeout(1_000);
+  const candidateText = await getDocumentText(page, "");
+  if (isRelatedRewrite(originalText, candidateText)) {
+    return "accepted";
+  }
+
+  await page.keyboard.press("ControlOrMeta+Z").catch(() => undefined);
+  await page.waitForTimeout(500);
+  return "rejected-unrelated";
+}
+
 async function getBodyText(page: Page): Promise<string> {
   try {
     return await page.locator("body").innerText({ timeout: 8_000 });
@@ -1186,19 +1235,23 @@ function buildFeatureResult({
 
 function buildRunFeatureNotes({
   opened,
-  acceptedRewrite,
+  rewriteStatus,
   rewriteProducing,
 }: {
   opened: boolean;
-  acceptedRewrite: boolean;
+  rewriteStatus: RewriteAcceptanceStatus;
   rewriteProducing: boolean;
 }): string {
   if (!opened) {
     return "The requested feature did not expose a clickable local Docs control; returned the proofreader/editor state instead.";
   }
 
-  if (acceptedRewrite) {
+  if (rewriteStatus === "accepted") {
     return "Opened the requested Grammarly feature, accepted the visible rewrite suggestion, and extracted the updated editor text.";
+  }
+
+  if (rewriteStatus === "rejected-unrelated") {
+    return "Opened the requested Grammarly rewrite feature, but rejected the visible rewrite suggestion because it did not appear related to the current input.";
   }
 
   if (rewriteProducing) {
@@ -1212,6 +1265,42 @@ function extractWritingQuality(text: string): number | null {
   return extractPercentNear(text, [
     /writing quality[^\d]{0,40}(\d{1,3})\s*\/\s*100/i,
   ]);
+}
+
+const commonRewriteStopWords = new Set([
+  "about",
+  "across",
+  "after",
+  "also",
+  "because",
+  "been",
+  "being",
+  "from",
+  "have",
+  "into",
+  "more",
+  "that",
+  "their",
+  "there",
+  "this",
+  "through",
+  "what",
+  "when",
+  "where",
+  "which",
+  "while",
+  "with",
+  "would",
+]);
+
+function meaningfulTokens(text: string): Set<string> {
+  return new Set(
+    Array.from(text.toLowerCase().matchAll(/[a-z0-9][a-z0-9'-]{3,}/g))
+      .map((match) => match[0].replace(/^'+|'+$/g, ""))
+      .filter(
+        (token) => token.length >= 4 && !commonRewriteStopWords.has(token),
+      ),
+  );
 }
 
 function extractAiPercent(text: string): number | null {

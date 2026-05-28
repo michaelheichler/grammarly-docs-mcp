@@ -5,6 +5,7 @@ import type { Page } from "playwright";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   copyBrowserProfile,
+  isRelatedRewrite,
   prepareSessionProfile,
   shouldCopyProfileEntry,
   tryAcceptRewriteSuggestion,
@@ -171,5 +172,23 @@ describe("rewrite suggestion handling", () => {
     await expect(tryAcceptRewriteSuggestion(page)).resolves.toBe(true);
     expect(missingClick).toHaveBeenCalledWith({ timeout: 5_000 });
     expect(acceptClick).toHaveBeenCalledWith({ timeout: 5_000 });
+  });
+
+  it("treats a rewrite about the same input as related", () => {
+    expect(
+      isRelatedRewrite(
+        "The sprint planning note is overly polished and sounds generated. It says the team will leverage a comprehensive framework to unlock productivity.",
+        "The sprint planning note sounds too formal and artificial. It says the team will use a clear framework to improve productivity.",
+      ),
+    ).toBe(true);
+  });
+
+  it("rejects cached rewrite text from an unrelated document", () => {
+    expect(
+      isRelatedRewrite(
+        "The sprint planning note is overly polished and sounds generated.",
+        "This home offers 6,000 square feet, five bedrooms, a guest suite, and a landscaped courtyard.",
+      ),
+    ).toBe(false);
   });
 });
